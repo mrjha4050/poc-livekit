@@ -111,7 +111,7 @@
 
     .meta {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 12px;
       margin-top: 18px;
     }
@@ -263,6 +263,7 @@
         <div class="card"><span class="label">Role</span><span id="roleValue">Not joined</span></div>
         <div class="card"><span class="label">Room</span><span id="roomValue">test-room</span></div>
         <div class="card"><span class="label">Streamer</span><span id="streamerValue">Waiting</span></div>
+        <div class="card"><span class="label">Watching</span><span id="watchingValue">0</span></div>
         <div class="card"><span class="label">Connection</span><span id="connectionValue">Idle</span></div>
       </div>
     </section>
@@ -307,8 +308,15 @@
     </section>
   </div>
 
-  <script src="/node_modules/livekit-client/dist/livekit-client.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
   <script>
+    if (!window.LivekitClient) {
+      const status = document.getElementById("status");
+      status.textContent = "Failed to load LiveKit client library. Check CDN/network settings.";
+      status.className = "status error";
+      throw new Error("LiveKit client library not loaded");
+    }
+
     const { Room, RoomEvent, Track, createLocalTracks, DataPacket_Kind } = window.LivekitClient;
 
     let room;
@@ -396,6 +404,13 @@
       updatePlaceholder();
     }
 
+    function setWatchingCount(participantCount, streamerIdentity = currentStreamerIdentity) {
+      const total = Number.isFinite(participantCount) ? participantCount : 0;
+      const streamerOffset = streamerIdentity ? 1 : 0;
+      const viewers = Math.max(0, total - streamerOffset);
+      setMeta("watchingValue", String(viewers));
+    }
+
     function attachVideoTrack(track, containerId, muted = false) {
       const element = track.attach();
       element.autoplay = true;
@@ -470,15 +485,16 @@
       addDebug(`Subscribed to ${track.kind} from ${participantIdentity}`);
 
       if (track.kind === Track.Kind.Video) {
-        if (participantIdentity === currentStreamerIdentity) {
-          attachVideoTrack(track, "streamVideoContainer", false);
-        } else {
-          addDebug(`Ignoring viewer video from ${participantIdentity}`);
+        // Server grants allow only the streamer to publish, so any remote video is the main stream.
+        // Keep streamer identity in sync with the actual publishing participant.
+        if (participantIdentity !== "unknown" && participantIdentity !== currentStreamerIdentity) {
+          setStreamerIdentity(participantIdentity);
         }
+        attachVideoTrack(track, "streamVideoContainer", false);
         return;
       }
 
-      if (track.kind === Track.Kind.Audio && participantIdentity === currentStreamerIdentity) {
+      if (track.kind === Track.Kind.Audio) {
         attachRemoteAudioTrack(track);
       }
     }
@@ -550,6 +566,7 @@
           const state = await getRoomState(currentRoomName).catch(() => null);
           if (state) {
             setStreamerIdentity(state.streamerIdentity);
+            setWatchingCount(state.participantCount, state.streamerIdentity);
           }
         });
 
@@ -564,6 +581,7 @@
           const state = await getRoomState(currentRoomName).catch(() => null);
           if (state) {
             setStreamerIdentity(state.streamerIdentity);
+            setWatchingCount(state.participantCount, state.streamerIdentity);
           }
         });
 
@@ -575,6 +593,7 @@
           clearRemoteAudio();
           const state = await getRoomState(currentRoomName).catch(() => null);
           setStreamerIdentity(state?.streamerIdentity || null);
+          setWatchingCount(state?.participantCount || 0, state?.streamerIdentity || null);
           renderExistingTracks();
         });
 
@@ -591,6 +610,11 @@
         });
 
         room.on(RoomEvent.DataReceived, (payload, participant) => {
+          // Ignore echoed packets from this same client, since sendMessage already renders "Me".
+          if (participant?.identity && participant.identity === currentIdentity) {
+            return;
+          }
+
           const message = new TextDecoder().decode(payload);
           addChatMessage(participant?.identity || "Unknown", message);
         });
